@@ -102,6 +102,7 @@ public:
 	static void fastRestart();
 	static void mapRestart();
 	static void quit();
+	static void unlockAll();
 private:
 	static bool isGodmode;
 };

@@ -353,8 +353,57 @@ void DvarInterface::addAllMappings() {
     addDvarsWithName("framesToWaitForVLobbyErrors");
     addDvarsWithName("allow_hub_vendor_menu");
     addDvarsWithName("r_ssrMaxQuality");
+    addDvarsWithName("playercard_fetch_own_enabled");
+
+    //ranked
+    addDvarsWithName("rankedPlayLeavePenaltyMasks");
+    addDvarsWithName("rankedPlayDisableFourPlayer");
+    addDvarsWithName("rankedPlayUseEngineCommit");
+    addDvarsWithName("rankedPlayMinimumMatchAdjustmentThreshold");
+    addDvarsWithName("rankedPlayPlacementSeasons");
+    addDvarsWithName("rankedPlayUseClientAlgorithm");
+    addDvarsWithName("rankedPlayUseClientTransitionAlgorithm");
+    addDvarsWithName("rankedPlaySeasonTransformMaxMMR");
+
+    //Elite
+    addMapping("elite_clan_using_title", "4106");
+    addMapping("elite_clan_single_task_popup_text", "2592");
 
 
+    //inventory
+    addMapping("inventory_ignoreDWPushNotification_itemUpdate", "5044");
+    addMapping("inventory_enabled", "1506");
+    addMapping("inventory_exchangeEnabled", "5050");
+    addMapping("inventory_exchangeRetryByRound", "5063");
+    addMapping("inventory_exchangeRetryBaseMS", "1529");
+    addMapping("inventory_exchangeRetryMax", "1889");
+    addMapping("inventory_consumableExchangeRetryMax", "4108");
+    addMapping("inventory_exchangeMaxConsumablesPerBoot", "2110");
+    addMapping("inventory_enableEntitlementDLCScanning", "3170");
+    addMapping("inventory_excludeEntitlementDLCScanning", "5709");
+    addMapping("inventory_addEntitlementsToLocalInventory", "3455");
+    addMapping("inventory_triggerExchangeOnContentMount", "1861");
+    addMapping("inventory_triggerExchangeOnStoreExit", "1600");
+    addMapping("inventory_exchangeClientID", "2327");
+    addMapping("inventory_enableRevoke", "4815");
+
+    //ranked
+    addMapping("rankedLockoutStrikeCooldown", "5754");
+    addMapping("rankedPlayLockoutMaxStrikes", "852");
+    addMapping("rankedPlayLockoutDuration", "12");
+    addMapping("rankedPlayInitialMMR", "2203");
+    addMapping("rankedPlayInitialWeight", "1833");
+
+    //Facebook
+    addMapping("facebook_username", "4323");
+    addMapping("facebook_password", "4776");
+    addMapping("facebook_password_asterisk", "4591");
+    addMapping("facebook_popup_text", "2744");
+    addMapping("facebook_friends_showing_count", "3860");
+
+    //dw_datachannel
+    addMapping("dw_datachannel_umbrellaRetryTime", "3436");
+    addMapping("dw_datachannel_umbrellaExpiryTimeOffset", "4194");
 
     addMapping("g_gametype", "1924", "The current game mode");
     addMapping("vendor_overhead_update_proximity", "5950");
@@ -898,9 +947,6 @@ void DvarInterface::addAllMappings() {
     addMapping("band_12players", "3829");
     addMapping("band_18players", "889");
     addMapping("band_lotsplayers", "4342");
-
-
-
 
     addMapping("cg_foliagesnd_alias", "4011", "The sound that plays when an actor or player enters a foliage clip brush.");
     addMapping("cg_broadcasterSkycamDistance", "3119");

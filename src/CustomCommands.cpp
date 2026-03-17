@@ -8,7 +8,8 @@
 #include <array>
 #include "DvarInterface.hpp"
 #include "GameUtil.hpp"
-#include <DevDef.h>
+#include "Hook.hpp"
+#include "DevDef.h"
 
 #define ASSET_ENTRY_SIZE 32
 uintptr_t CustomCommands::base = (uintptr_t)GetModuleHandle(NULL) + 0x1000;
@@ -288,6 +289,35 @@ void CustomCommands::tempToggleWireframe() {
 	if (ReadProcessMemory(GetCurrentProcess(), address, &current, sizeof(current), nullptr)) {
 		toggleWireframe(current != std::byte{ 0x20 });
 	}
+}
+
+typedef ItemLockStatus(*LiveStorage_IsItemUnlockedFromTable)(/*dont care*/);
+LiveStorage_IsItemUnlockedFromTable _LiveStorage_IsItemUnlockedFromTable = nullptr;
+
+typedef ItemLockStatus(*LiveStorage_GetItemLockStatus)(/*dont care*/);
+LiveStorage_GetItemLockStatus _LiveStorage_GetItemLockStatus = nullptr;
+
+typedef bool(*GetIsItemUnlockedStr)(bool __cdecl GetIsItemUnlockedStr(LocalClientNum_t num, char const* str));
+GetIsItemUnlockedStr _GetIsItemUnlockedStr = nullptr;
+
+ItemLockStatus returnUnlocked() {
+	return ItemLockStatus_Unlocked;
+}
+bool hook_GetIsItemUnlockedStr() {
+	return true;
+}
+
+void CustomCommands::unlockAll() {
+	Hook::nopMem((void*)0xCE822_b, 2); //LiveStorage_GetItemLockStateFromStatus (just in case, force "Unlocked")
+
+	MH_CreateHook(reinterpret_cast<void*>(0xCFB10_b), &returnUnlocked, reinterpret_cast<void**>(&_LiveStorage_IsItemUnlockedFromTable));
+	MH_EnableHook(reinterpret_cast<void*>(0xCFB10_b));
+
+	MH_CreateHook(reinterpret_cast<void*>(0xCE850_b), &returnUnlocked, reinterpret_cast<void**>(&_LiveStorage_GetItemLockStatus));
+	MH_EnableHook(reinterpret_cast<void*>(0xCE850_b));
+
+	MH_CreateHook(reinterpret_cast<void*>(0x73E9F0_b), &hook_GetIsItemUnlockedStr, reinterpret_cast<void**>(&_GetIsItemUnlockedStr));
+	MH_EnableHook(reinterpret_cast<void*>(0x73E9F0_b));
 }
 
 //when it works, causes too many lui errors in main.lua

@@ -187,6 +187,7 @@ void Console::registerCustomCommands() {
 	GameUtil::addCommand("clear", &InternalConsole::clearFullConsole);
 	GameUtil::addCommand("r_fullbright", &CustomCommands::tempToggleFullbright);
 	GameUtil::addCommand("r_wireframe", &CustomCommands::tempToggleWireframe);
+	GameUtil::addCommand("unlockall", &CustomCommands::unlockAll);
 #ifdef DEVELOPMENT_BUILD
 	GameUtil::addCommand("printfNullptr", &printfCrashTest);
 	GameUtil::addCommand("enginemode", &setenginemode);
