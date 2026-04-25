@@ -4,6 +4,7 @@
 ////////////////////////////////////////////
 #include "pch.h"
 #include "Arxan.hpp"
+#include <winternl.h>
 
 #pragma intrinsic(_ReturnAddress)
 
@@ -20,8 +21,7 @@ NtUserBuildHwndList_t fpNtUserBuildHwndList = nullptr;
 typedef BOOL(WINAPI* CheckRemoteDebuggerPresent_t)(HANDLE hProcess, PBOOL pbDebuggerPresent);
 CheckRemoteDebuggerPresent_t fpCheckRemoteDebuggerPresent = nullptr;
 
-typedef NTSTATUS(WINAPI* NtCreateThreadEx_t)(OUT PHANDLE ThreadHandle, IN ACCESS_MASK DesiredAccess, IN PVOID ObjectAttributes, IN HANDLE ProcessHandle, IN PVOID StartRoutine, IN PVOID Argument,
-    IN ULONG CreateFlags, IN SIZE_T ZeroBits, IN SIZE_T StackSize, IN SIZE_T MaximumStackSize, IN PVOID AttributeList);
+typedef NTSTATUS(WINAPI* NtCreateThreadEx_t)(OUT PHANDLE ThreadHandle, IN ACCESS_MASK DesiredAccess, IN PVOID ObjectAttributes, IN HANDLE ProcessHandle, IN PVOID StartRoutine, IN PVOID Argument, IN ULONG CreateFlags, IN SIZE_T ZeroBits, IN SIZE_T StackSize, IN SIZE_T MaximumStackSize, IN PVOID AttributeList);
 NtCreateThreadEx_t fpNtCreateThreadEx = nullptr;
 
 typedef NTSTATUS(WINAPI* NtSetInformationThread_t)(HANDLE ThreadHandle, THREAD_INFORMATION_CLASS ThreadInformationClass, PVOID ThreadInformation, ULONG ThreadInformationLength);
@@ -30,104 +30,17 @@ NtSetInformationThread_t fpNtSetInformationThread = nullptr;
 typedef NTSTATUS(WINAPI* NtQueryInformationThread_t)(HANDLE ThreadHandle, THREAD_INFORMATION_CLASS ThreadInformationClass, PVOID ThreadInformation, ULONG ThreadInformationLength, PULONG ReturnLength);
 NtQueryInformationThread_t fpNtQueryInformationThread = nullptr;
 
-//these are the functions Arxan uses to break debugging
-const char* kPatchedFuncs[] = {
-    "DbgBreakPoint", "DbgUserBreakPoint", "DbgUiConnectToDbg", "DbgUiContinue",
-    "DbgUiConvertStateChangeStructure", "DbgUiDebugActiveProcess", "DbgUiGetThreadDebugObject",
-    "DbgUiIssueRemoteBreakin", "DbgUiRemoteBreakin", "DbgUiSetThreadDebugObject",
-    "DbgUiStopDebugging", "DbgUiWaitStateChange", "DbgPrintReturnControlC", "DbgPrompt"
-};
-
-std::vector<std::string> evilStrings = {
-    "cheatengine", "x64dbg", "x32dbg", "cheat", "debug", "ida"
-};
-
-//helper to restore the first N bytes of a function
-bool restoreFunctionPrologue(const char* moduleName, const char* funcName, size_t numBytes = 14) {
-    HMODULE localModule = GetModuleHandleA(moduleName);
-    if (!localModule) {
-        Console::print(std::string("Failed to get local module: ") + moduleName);
-        return false;
-    }
-
-    //get the clean function address from this process
-    FARPROC cleanFunc = GetProcAddress(localModule, funcName);
-    if (!cleanFunc) {
-        Console::print(std::string("Failed to get clean func: ") + funcName);
-        return false;
-    }
-
-    //copy the first N bytes into buffer
-    BYTE originalBytes[32] = { 0 };
-    memcpy(originalBytes, cleanFunc, numBytes);
-
-    //unprotect memory
-    DWORD oldProtect;
-    if (!VirtualProtect((LPVOID)cleanFunc, numBytes, PAGE_EXECUTE_READWRITE, &oldProtect)) {
-        Console::labelPrint(DebugPatches::conLabel, std::string("Failed to unprotect memory: ") + funcName);
-        return false;
-    }
-
-    //restore the bytes
-    memcpy((void*)cleanFunc, originalBytes, numBytes);
-    VirtualProtect((LPVOID)cleanFunc, numBytes, oldProtect, &oldProtect);
-    //Console::labelPrint(DebugPatches::conLabel, std::string("Restored: ") + funcName);
-    return true;
-}
-
-void restoreAllPatchedFunctions() {
-#ifdef ARXAN_DEBUG_INFO
-    Console::labelPrint(DebugPatches::conLabel, "Restoring debugger-blocked functions...");
-#endif // ARXAN_DEBUG_INFO  
-    for (const auto& funcName : kPatchedFuncs) {
-        restoreFunctionPrologue("ntdll.dll", funcName);
-    }
-
-    //CopyFileExW
-    restoreFunctionPrologue("kernel32.dll", "CopyFileExW");
-}
-
-//check for evil strings
-bool shouldFilterEvilStrings(HWND hwnd) {
-    char windowTitle[256] = { 0 };
-    if (GetWindowTextA(hwnd, windowTitle, sizeof(windowTitle)) > 0) {
-        std::string title(windowTitle);
-        for (const auto& bad : evilStrings) {
-            if (title.find(bad) != std::string::npos) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
 NTSTATUS WINAPI HookedNtUserBuildHwndList(HDESK hdesk, HWND hwndParent, BOOL fChildren, BOOL fOwner, DWORD dwThreadId, UINT cHwndMax, HWND* phwnd, PUINT pcHwndNeeded) {
     NTSTATUS result = fpNtUserBuildHwndList(hdesk, hwndParent, fChildren, fOwner, dwThreadId, cHwndMax, phwnd, pcHwndNeeded);
 
-    if (NT_SUCCESS(result) && phwnd != nullptr && pcHwndNeeded != nullptr) {
-        UINT count = *pcHwndNeeded;
-        std::vector<HWND> filteredHwnds;
-
-        for (UINT i = 0; i < count; i++) {
-            if (!shouldFilterEvilStrings(phwnd[i])) {
-                filteredHwnds.push_back(phwnd[i]);
-            }
-        }
-
-        //copy filtered hwnd list
-        UINT newSize = static_cast<UINT>(filteredHwnds.size());
-        std::memcpy(phwnd, filteredHwnds.data(), newSize * sizeof(HWND));
-        *pcHwndNeeded = newSize;
+    if (NT_SUCCESS(result) && pcHwndNeeded) {
+        *pcHwndNeeded = 0;
     }
 
     return result;
 }
 
 void bypassHwndChecks() {
-#ifdef ARXAN_DEBUG_INFO
-    Console::labelPrint(DebugPatches::conLabel, "Patching HWND Checks");
-#endif // ARXAN_DEBUG_INFO
-
     HMODULE hUser32 = LoadLibraryA("win32u.dll");
     if (!hUser32) {
         Console::print("Failed to load win32u.dll");
@@ -156,14 +69,7 @@ using NtQueryInformationProcess_t = NTSTATUS(NTAPI*)(HANDLE, PROCESSINFOCLASS, P
 NtClose_t fpNtClose = nullptr;
 NtQueryInformationProcess_t fpNtQueryInformationProcess = nullptr;
 
-typedef NTSTATUS(NTAPI* PNTQUERYOBJECT)(
-    HANDLE Handle,
-    OBJECT_INFORMATION_CLASS ObjectInformationClass,
-    PVOID ObjectInformation,
-    ULONG ObjectInformationLength,
-    PULONG ReturnLength
-    );
-
+typedef NTSTATUS(NTAPI* PNTQUERYOBJECT)(HANDLE Handle, OBJECT_INFORMATION_CLASS ObjectInformationClass, PVOID ObjectInformation, ULONG ObjectInformationLength, PULONG ReturnLength);
 PNTQUERYOBJECT pNtQueryObject = nullptr;
 
 
@@ -187,16 +93,10 @@ NTSTATUS NTAPI HookedNtClose(HANDLE handle) {
 #ifndef ProcessDebugFlags
 #define ProcessDebugFlags 31
 #endif 
-using fnNtQueryInformationProcess = NTSTATUS(WINAPI*)(
-    HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG);
+using fnNtQueryInformationProcess = NTSTATUS(WINAPI*)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG); 
 fnNtQueryInformationProcess oNtQueryInformationProcess = nullptr;
-NTSTATUS WINAPI HookedNtQueryInformationProcess(
-    HANDLE handle,
-    PROCESSINFOCLASS info_class,
-    PVOID info,
-    ULONG info_length,
-    PULONG ret_length)
-{
+
+NTSTATUS WINAPI HookedNtQueryInformationProcess(HANDLE handle, PROCESSINFOCLASS info_class, PVOID info, ULONG info_length, PULONG ret_length) {
     const NTSTATUS status = oNtQueryInformationProcess(handle, info_class, info, info_length, ret_length);
 
     if (NT_SUCCESS(status)) {
@@ -246,15 +146,10 @@ NTSTATUS WINAPI HookedNtCreateThreadEx(PHANDLE ThreadHandle, ACCESS_MASK Desired
         Console::labelPrint(DebugPatches::conLabel, "Stripped THREAD_CREATE_FLAGS_HIDE_FROM_DEBUGGER from thread creation");
     }
 
-    return fpNtCreateThreadEx(ThreadHandle, DesiredAccess, ObjectAttributes, ProcessHandle, StartRoutine, Argument, CreateFlags,
-        ZeroBits, StackSize, MaximumStackSize, AttributeList);
+    return fpNtCreateThreadEx(ThreadHandle, DesiredAccess, ObjectAttributes, ProcessHandle, StartRoutine, Argument, CreateFlags, ZeroBits, StackSize, MaximumStackSize, AttributeList);
 }
 
 void bypassHiddenThreadCreation() {
-#ifdef ARXAN_DEBUG_INFO
-    Console::labelPrint(DebugPatches::conLabel, "Patching NtCreateThreadEx");
-#endif // ARXAN_DEBUG_INFO
-
     HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
     if (!hNtdll) {
         Console::print("Failed to get handle for ntdll.dll");
@@ -278,51 +173,14 @@ void bypassHiddenThreadCreation() {
     }
 }
 NTSTATUS WINAPI HookedNtSetInformationThread(HANDLE ThreadHandle, THREAD_INFORMATION_CLASS ThreadInformationClass, PVOID ThreadInformation, ULONG ThreadInformationLength) {
-    //block attempts to hide thread from debooger
-                                      //ThreadHideFromDebugger v
     if (ThreadInformationClass == (THREAD_INFORMATION_CLASS)ThreadHideFromDebugger) {
-#ifdef ARXAN_DEBUG_INFO
-        Console::labelPrint(DebugPatches::conLabel, "Blocked ThreadHideFromDebugger via NtSetInformationThread");
-#endif // ARXAN_DEBUG_INFO     
         return 0; //success
     }
 
     return fpNtSetInformationThread(ThreadHandle, ThreadInformationClass, ThreadInformation, ThreadInformationLength);
 }
 
-void antiDebuggerSyscalls() {
-#ifdef ARXAN_DEBUG_INFO
-    Console::labelPrint(DebugPatches::conLabel, "Patching CheckRemoteDebuggerPresent");
-#endif // ARXAN_DEBUG_INFO
-
-    HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
-    if (!hKernel32) {
-        Console::print("Failed to get handle for kernel32.dll");
-        return;
-    }
-
-    FARPROC pFunc = GetProcAddress(hKernel32, "CheckRemoteDebuggerPresent");
-    if (!pFunc) {
-        Console::print("Failed to get address of CheckRemoteDebuggerPresent");
-        return;
-    }
-
-    if (MH_CreateHook(pFunc, &HookedCheckRemoteDebuggerPresent, reinterpret_cast<LPVOID*>(&fpCheckRemoteDebuggerPresent)) != MH_OK) {
-        Console::print("Failed to create hook for CheckRemoteDebuggerPresent");
-        return;
-    }
-
-    if (MH_EnableHook(pFunc) != MH_OK) {
-        Console::print("Failed to enable hook for CheckRemoteDebuggerPresent");
-        return;
-    }
-}
-
 void bypassThreadHideFromDebugger() {
-#ifdef ARXAN_DEBUG_INFO
-    Console::labelPrint(DebugPatches::conLabel, "Patching ThreadHideFromDebugger");
-#endif // ARXAN_DEBUG_INFO
-
     HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
     if (!hNtdll) {
         Console::print("Failed to get handle for ntdll.dll");
@@ -347,11 +205,6 @@ void bypassThreadHideFromDebugger() {
 }
 
 void hookNtClose() {
-#ifdef ARXAN_DEBUG_INFO
-    Console::labelPrint(DebugPatches::conLabel, "Hooking Anti-Debugging APIs");
-#endif // ARXAN_DEBUG_INFO
-
-
     HMODULE hNtDll = GetModuleHandleA("ntdll.dll");
     if (hNtDll) {
         pNtQueryObject = (PNTQUERYOBJECT)GetProcAddress(hNtDll, "NtQueryObject");
@@ -363,140 +216,6 @@ void hookNtClose() {
     }
     MH_EnableHook(MH_ALL_HOOKS);
 }
-
-#ifdef ARXAN_LOG_VEH
-using AddVEHFunc = PVOID(WINAPI*)(ULONG, PVECTORED_EXCEPTION_HANDLER);
-AddVEHFunc fpAddVEH = nullptr;
-
-std::ofstream vehLog("VEH_Log.txt", std::ios::app);
-
-void LogVEHInfo(const std::string& msg) {
-    if (vehLog.is_open())
-        vehLog << msg << std::endl;
-    //Console::print(msg);
-}
-
-std::string DumpBytes(void* addr, size_t length = 16) {
-    std::ostringstream oss;
-    //__try {
-    unsigned char* p = reinterpret_cast<unsigned char*>(addr);
-    for (size_t i = 0; i < length; ++i) {
-        oss << std::setw(2) << std::setfill('0') << std::hex << (int)p[i] << " ";
-    }
-    // }
-     //__except (EXCEPTION_EXECUTE_HANDLER) {
-       //  oss << "[unreadable memory]";
-    // }
-    return oss.str();
-}
-
-PVOID WINAPI HookedAddVEH(ULONG First, PVECTORED_EXCEPTION_HANDLER Handler) {
-    void* returnAddress = _ReturnAddress();
-
-    std::string handlerBytes = DumpBytes((void*)Handler, 24);
-    std::string returnAddrBytes = DumpBytes(returnAddress, 24);
-
-    char buffer[1024];
-    snprintf(buffer, sizeof(buffer),
-        "\n[VEH Installed]\n"
-        "  First: %lu\n"
-        "  Handler: 0x%p\n"
-        "    Bytes: %s\n"
-        "  ReturnAddress: 0x%p\n"
-        "    Bytes: %s\n",
-        First,
-        Handler, handlerBytes.c_str(),
-        returnAddress, returnAddrBytes.c_str());
-
-    LogVEHInfo(buffer);
-
-    return fpAddVEH(First, Handler);
-}
-
-void hookAddVEH() {
-    Console::labelPrint(DebugPatches::conLabel, "Patching AddVectoredExceptionHandler");
-
-    HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
-    if (!hKernel32) {
-        Console::print("Failed to get handle for kernel32.dll");
-        return;
-    }
-
-    FARPROC pFunc = GetProcAddress(hKernel32, "AddVectoredExceptionHandler");
-    if (!pFunc) {
-        Console::print("Failed to get address of AddVectoredExceptionHandler");
-        return;
-    }
-
-    if (MH_CreateHook(pFunc, &HookedAddVEH, reinterpret_cast<LPVOID*>(&fpAddVEH)) != MH_OK) {
-        Console::print("Failed to create hook for AddVectoredExceptionHandler");
-        return;
-    }
-
-    if (MH_EnableHook(pFunc) != MH_OK) {
-        Console::print("Failed to enable hook for AddVectoredExceptionHandler");
-        return;
-    }
-#ifdef ARXAN_DEBUG_INFO
-    Console::labelPrint(DebugPatches::conLabel, "Successfully hooked AddVectoredExceptionHandler");
-#endif // ARXAN_DEBUG_INFO
-
-}
-
-
-void DumpKnownAPIs() {
-    HMODULE hKernel = GetModuleHandleA("kernel32.dll");
-    if (!hKernel) return;
-
-    std::vector<std::string> apis = {
-        "GetSystemInfo", "VirtualProtect", "GetTickCount",
-        "IsDebuggerPresent", "CreateFileW", "ReadFile"
-    };
-
-    LogVEHInfo("\n[API Fingerprints]");
-    for (const auto& name : apis) {
-        FARPROC addr = GetProcAddress(hKernel, name.c_str());
-        if (addr) {
-            char line[256];
-            snprintf(line, sizeof(line), "  %s = 0x%p", name.c_str(), addr);
-            LogVEHInfo(line);
-        }
-    }
-}
-#endif
-
-void hide_being_debugged() {
-    auto* const peb = PPEB(__readgsqword(0x60));
-    peb->BeingDebugged = false;
-    *reinterpret_cast<PDWORD>(LPSTR(peb) + 0xBC) &= ~0x70;
-}
-
-std::atomic_bool hbdRunning = true;
-void startHideDebugLoop() {
-#ifdef ARXAN_DEBUG_INFO
-    Console::labelPrint(DebugPatches::conLabel, "Starting HBD Thread");
-#endif // ARXAN_DEBUG_INFO
-
-    std::thread([] {
-        while (hbdRunning) {
-            hide_being_debugged();
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-        }).detach();
-}
-
-
-#ifndef ProcessDebugObjectHandle
-#define ProcessDebugObjectHandle static_cast<PROCESSINFOCLASS>(0x1e)
-#endif
-
-#ifndef ProcessDebugPort
-#define ProcessDebugPort static_cast<PROCESSINFOCLASS>(0x7)
-#endif
-
-#ifndef ProcessDebugFlags
-#define ProcessDebugFlags static_cast<PROCESSINFOCLASS>(0x1f)
-#endif
 
 void clearHWBP(void) {
     CONTEXT ctx{};
@@ -516,33 +235,16 @@ void clearHWBP(void) {
     }
 }
 
-NTSTATUS WINAPI HookedNtQueryInformationThread(
-    HANDLE ThreadHandle,
-    THREAD_INFORMATION_CLASS ThreadInformationClass,
-    PVOID ThreadInformation,
-    ULONG ThreadInformationLength,
-    PULONG ReturnLength
-) {
+NTSTATUS WINAPI HookedNtQueryInformationThread(HANDLE ThreadHandle, THREAD_INFORMATION_CLASS ThreadInformationClass, PVOID ThreadInformation, ULONG ThreadInformationLength, PULONG ReturnLength) {
     if (ThreadInformationClass == (THREAD_INFORMATION_CLASS)ThreadHideFromDebugger) {
         Console::print("Blocked NtQueryInformationThread(ThreadHideFromDebugger)");
         return 0xC00000BB; //STATUS_NOT_SUPPORTED
     }
 
-    return fpNtQueryInformationThread(
-        ThreadHandle,
-        ThreadInformationClass,
-        ThreadInformation,
-        ThreadInformationLength,
-        ReturnLength
-    );
+    return fpNtQueryInformationThread(ThreadHandle, ThreadInformationClass, ThreadInformation, ThreadInformationLength, ReturnLength);
 }
 
 void bypassThreadQueryHideFromDebugger() {
-#ifdef ARXAN_DEBUG_INFO
-    Console::labelPrint(DebugPatches::conLabel, "Patching NtQueryInformationThread");
-#endif // ARXAN_DEBUG_INFO
-
-
     HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
     if (!hNtdll) {
         Console::print("Failed to get handle for ntdll.dll");
@@ -566,19 +268,7 @@ void bypassThreadQueryHideFromDebugger() {
     }
 }
 
-LONG WINAPI interrupt2dFilter(const LPEXCEPTION_POINTERS info) {
-    if (info->ExceptionRecord->ExceptionCode == STATUS_INVALID_HANDLE)
-    {
-        return EXCEPTION_CONTINUE_EXECUTION;
-    }
-
-    return EXCEPTION_CONTINUE_SEARCH;
-}
-
 void hookNtQueryInformationProcess() {
-#ifdef ARXAN_DEBUG_INFO
-    Console::labelPrint(DebugPatches::conLabel, "Patching NtQueryInformationProcess");
-#endif // ARXAN_DEBUG_INFO
     HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
     if (!hNtdll) {
         Console::print("Failed to get handle for ntdll.dll");
@@ -600,33 +290,397 @@ void hookNtQueryInformationProcess() {
         Console::print("Failed to enable hook for NtQueryInformationProcess");
         return;
     }
-
-#ifdef ARXAN_DEBUG_INFO
-    Console::labelPrint(DebugPatches::conLabel, "Successfully hooked NtQueryInformationProcess");
-#endif // ARXAN_DEBUG_INFO
 }
 
-void DebugPatches::init() {
-#ifdef DEVELOPMENT_BUILD
-    Console::initPrint(std::string(__FUNCTION__));
-#endif // DEVELOPMENT_BUILD
+typedef NTSTATUS(NTAPI* NtQuerySystemInformation_t)(ULONG SystemInformationClass, PVOID SystemInformation, ULONG SystemInformationLength, PULONG ReturnLength);
+NtQuerySystemInformation_t fpNtQuerySystemInformation = nullptr;
+typedef NTSTATUS(NTAPI* NtQueryObject_t)(HANDLE Handle, ULONG ObjectInformationClass, PVOID ObjectInformation, ULONG ObjectInformationLength, PULONG ReturnLength);
+#define SystemExtendedHandleInformation 64
+#define ObjectNameInformation 1
+#define ObjectTypeInformation 2
+
+std::wstring toLower(std::wstring s) {
+    for (auto& c : s) {
+        c = (wchar_t)towlower(c);
+    }
+    return s;
+}
+
+
+bool containsSubstring(const std::wstring& text, const std::wstring& sub, bool caseInsensitive) {
+    if (caseInsensitive) {
+        return toLower(text).find(toLower(sub)) != std::wstring::npos;
+    }
+
+    return text.find(sub) != std::wstring::npos;
+}
+
+
+size_t closeCurrentProcessMutantsContaining(const std::wstring& substring, bool caseInsensitive = true, bool dryRun = false) {
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (!ntdll) {
+        return 0;
+    }
+    
+    NtQueryObject_t NtQueryObject = (NtQueryObject_t)GetProcAddress(ntdll, "NtQueryObject");
+
+    if (!fpNtQuerySystemInformation || !NtQueryObject) {
+        return 0;
+    }
+
+    DWORD currentPid = GetCurrentProcessId();
+    ULONG handleInfoSize = 0x10000;
+    std::vector<BYTE> handleInfoBuffer(handleInfoSize);
+
+    NTSTATUS status;
+
+    while (true) {
+        status = fpNtQuerySystemInformation(SystemExtendedHandleInformation, handleInfoBuffer.data(), handleInfoSize, &handleInfoSize);
+
+        if (status == STATUS_INFO_LENGTH_MISMATCH) {
+            handleInfoSize *= 2;
+            handleInfoBuffer.resize(handleInfoSize);
+            continue;
+        }
+
+        break;
+    }
+
+    if (!NT_SUCCESS(status)) {
+        return 0;
+    }
+
+    PSYSTEM_HANDLE_INFORMATION_EX handleInfo = reinterpret_cast<PSYSTEM_HANDLE_INFORMATION_EX>(handleInfoBuffer.data());
+
+    size_t closedCount = 0;
+
+    for (ULONG_PTR i = 0; i < handleInfo->NumberOfHandles; i++) {
+        auto& entry = handleInfo->Handles[i];
+
+        if ((DWORD)entry.UniqueProcessId != currentPid) {
+            continue;
+        }
+
+        HANDLE h = reinterpret_cast<HANDLE>(entry.HandleValue);
+        BYTE typeBuffer[0x1000] = {};
+        ULONG returnLength = 0;
+
+        status = NtQueryObject(h, ObjectTypeInformation, typeBuffer, sizeof(typeBuffer), &returnLength);
+
+        if (!NT_SUCCESS(status)) {
+            continue;
+        }
+
+        UNICODE_STRING* typeName = reinterpret_cast<UNICODE_STRING*>(typeBuffer);
+
+        if (!typeName->Buffer || typeName->Length == 0) {
+            continue;
+        }
+
+        std::wstring type(typeName->Buffer, typeName->Length / sizeof(wchar_t));
+
+        if (type != L"Mutant") {
+            continue;
+        }
+
+        ULONG nameBufferSize = 0x1000;
+        std::vector<BYTE> nameBuffer(nameBufferSize);
+
+        status = NtQueryObject(h, ObjectNameInformation, nameBuffer.data(), nameBufferSize, &returnLength);
+
+        if (status == STATUS_INFO_LENGTH_MISMATCH || returnLength > nameBufferSize) {
+            nameBufferSize = returnLength;
+            nameBuffer.resize(nameBufferSize);
+
+            status = NtQueryObject(h, ObjectNameInformation, nameBuffer.data(), nameBufferSize, &returnLength);
+        }
+
+        if (!NT_SUCCESS(status)) {
+            continue;
+        }
+
+        UNICODE_STRING* objectName = reinterpret_cast<UNICODE_STRING*>(nameBuffer.data());
+
+        if (!objectName->Buffer || objectName->Length == 0) {
+            continue;
+        }
+
+        std::wstring name(objectName->Buffer, objectName->Length / sizeof(wchar_t));
+
+        if (!containsSubstring(name, substring, caseInsensitive)) {
+            continue;
+        }
+
+
+        if (!dryRun) {
+            if (CloseHandle(h)) {
+                closedCount++;
+            }
+        }
+    }
+
+    return closedCount;
+}
+
+void freeIdaMutants() {
+    //game would hold the mutex for ida module handles, forcing ida to fail to load lol
+    size_t closedIda = closeCurrentProcessMutantsContaining(L"IDA ", true, false); //very needed
+    size_t closeMisc = closeCurrentProcessMutantsContaining(L"WilStaging_02", true, false); //idk but looked sus
+    closeMisc += closeCurrentProcessMutantsContaining(L"WilError_03", true, false); //idk but looked sus
+    DEV_PRINTF("Closed %zu IDA Mutants", closedIda);
+    DEV_PRINTF("Closed %zu Misc Mutants", closeMisc);
+}
+
+
+typedef _CLIENT_ID* R_PCLIENT_ID; //ffs
+
+typedef NTSTATUS(NTAPI* NtOpenProcess_t)(PHANDLE ProcessHandle, ACCESS_MASK DesiredAccess, POBJECT_ATTRIBUTES ObjectAttributes, R_PCLIENT_ID ClientId);
+NtOpenProcess_t fpNtOpenProcess = nullptr;
+
+//prevent the steam must be running error from us blocking the processes
+bool isSteamProcessId_Nt(DWORD pid) {
+    if (!fpNtOpenProcess || pid == 0) {
+        return false;
+    }
+
+    HANDLE hProc = nullptr;
+
+    _CLIENT_ID cid{};
+    cid.UniqueProcess = reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(pid));
+    cid.UniqueThread = nullptr;
+
+    OBJECT_ATTRIBUTES oa{};
+    InitializeObjectAttributes(&oa, nullptr, 0, nullptr, nullptr);
+
+    NTSTATUS status = fpNtOpenProcess(&hProc, PROCESS_QUERY_LIMITED_INFORMATION, &oa, &cid);
+
+    if (status < 0 || !hProc) {
+        return false;
+    }
+
+    bool result = false;
+
+    wchar_t path[MAX_PATH]{};
+    DWORD size = MAX_PATH;
+
+    if (QueryFullProcessImageNameW(hProc, 0, path, &size)){
+        const wchar_t* name = wcsrchr(path, L'\\');
+        name = name ? name + 1 : path;
+
+        if (_wcsicmp(name, L"steam.exe") == 0)
+            result = true;
+    }
+
+    CloseHandle(hProc);
+    return result;
+}
+
+
+NTSTATUS NtOpenProcess_hookfunc(PHANDLE ProcessHandle, ACCESS_MASK DesiredAccess, POBJECT_ATTRIBUTES ObjectAttributes, R_PCLIENT_ID ClientId) {
+    if (ProcessHandle) {
+        *ProcessHandle = nullptr;
+    }
+
+    if (!fpNtOpenProcess || !ClientId || !ClientId->UniqueProcess) {
+        return STATUS_ACCESS_DENIED;
+    }
+
+    DWORD pid = static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(ClientId->UniqueProcess));
+
+    if (!isSteamProcessId_Nt(pid)) {
+        return STATUS_ACCESS_DENIED;
+    }
+
+    return fpNtOpenProcess(ProcessHandle, DesiredAccess, ObjectAttributes, ClientId);
+}
+
+void disableProgramScans() {
+    //NtOpenProcess 
+    HMODULE dll = GetModuleHandleA("ntdll.dll");
+    if (!dll) {
+        return;
+    }
+    FARPROC pFunc = GetProcAddress(dll, "NtOpenProcess");
+    if (!pFunc) {
+        Console::print("Failed to get address of NtOpenProcess");
+        return;
+    }
+    
+    if (MH_CreateHook(pFunc, &NtOpenProcess_hookfunc, reinterpret_cast<LPVOID*>(&fpNtOpenProcess)) != MH_OK) {
+        Console::print("Failed to create hook for NtOpenProcess");
+        return;
+    }
+    
+    if (MH_EnableHook(pFunc) != MH_OK) {
+        Console::print("Failed to enable hook for NtOpenProcess");
+        return;
+    }
+}
+
+
+typedef BOOLEAN(NTAPI* RtlEqualUnicodeString_t)(PUNICODE_STRING, PUNICODE_STRING, BOOLEAN);
+RtlEqualUnicodeString_t fpRtlEqualUnicodeString = nullptr;
+void myRtlInitUnicodeString(PUNICODE_STRING dst, PCWSTR src) {
+    if (!src) {
+        dst->Length = 0;
+        dst->MaximumLength = 0;
+        dst->Buffer = NULL;
+        return;
+    }
+
+    size_t len = wcslen(src) * sizeof(WCHAR);
+
+    dst->Length = (USHORT)len;
+    dst->MaximumLength = (USHORT)(len + sizeof(WCHAR));
+    dst->Buffer = (PWSTR)src;
+}
+__kernel_entry NTSTATUS NtQuerySystemInformation_hookfunc(ULONG SystemInformationClass, PVOID SystemInformation, ULONG SystemInformationLength, PULONG ReturnLength) {
+    NTSTATUS status = fpNtQuerySystemInformation(SystemInformationClass, SystemInformation, SystemInformationLength, ReturnLength);
+    if (!NT_SUCCESS(status) || SystemInformationClass != SystemProcessInformation || SystemInformation == NULL) {
+        return status;
+    }
+
+    const wchar_t* blockedProcesses[] = {
+        L"OLLYDBG.exe",
+        L"x32dbg.exe",
+        L"x64dbg.exe",
+        L"x96dbg.exe",
+        L"windbg.exe",
+        L"dnSpy.exe",
+        L"HxD.exe",
+        L"ida.exe", //weirdly the ida ones arent needed.
+        L"ida64.exe",
+        L"ImmunityDebugger.exe",
+        L"Scylla_x64.exe",
+        L"Scylla_x86.exe",
+        L"OllyDumpEx_SA32.exe",
+        L"OllyDumpEx_SA64.exe",
+        L"apimonitor-x64.exe",
+        L"apimonitor-x86.exe",
+        L"cheatengine-x86_64.exe",
+        L"Cheat Engine.exe",
+        L"cheatengine-x86_64-SSE4-AVX2.exe",
+        L"cheatengine-i386.exe",
+    };
+    const size_t numBlockedProcesses = sizeof(blockedProcesses) / sizeof(blockedProcesses[0]);
+
+    PSYSTEM_PROCESS_INFORMATION spi = (PSYSTEM_PROCESS_INFORMATION)SystemInformation;
+    PSYSTEM_PROCESS_INFORMATION prevSpi = NULL;
+
+    while (true) {
+        bool blockedName = false;
+
+        if (spi->ImageName.Buffer && spi->ImageName.Length > 0) {
+            UNICODE_STRING name = spi->ImageName;
+            for (size_t i = 0; i < numBlockedProcesses; i++) {
+                UNICODE_STRING blocked;
+                myRtlInitUnicodeString(&blocked, blockedProcesses[i]);
+
+                if (fpRtlEqualUnicodeString(&name, &blocked, TRUE)) {
+                    blockedName = true;
+                    //DEV_PRINTF("Blocked-name process observed: PID=%lu | Name=%.*ls", (DWORD)(ULONG_PTR)spi->UniqueProcessId, spi->ImageName.Length / sizeof(WCHAR), spi->ImageName.Buffer);
+                    break;
+                }
+            }
+
+            if (blockedName) {
+                if (prevSpi == NULL) {
+                    if (spi->NextEntryOffset == 0) {
+                        RtlZeroMemory(SystemInformation, SystemInformationLength);
+                        if (ReturnLength) {
+                            *ReturnLength = 0;
+                        }
+                        return status;
+                    }
+                    else {
+                        PSYSTEM_PROCESS_INFORMATION nextSpi = (PSYSTEM_PROCESS_INFORMATION)((BYTE*)spi + spi->NextEntryOffset);
+                        ULONG moveSize = SystemInformationLength - spi->NextEntryOffset;
+                        RtlMoveMemory(SystemInformation, nextSpi, moveSize);
+                        if (ReturnLength) {
+                            *ReturnLength -= spi->NextEntryOffset;
+                        }
+                        spi = (PSYSTEM_PROCESS_INFORMATION)SystemInformation;
+                        prevSpi = NULL;
+                        continue;
+                    }
+                }
+                else {
+                    if (spi->NextEntryOffset == 0) {
+                        prevSpi->NextEntryOffset = 0;
+                        if (ReturnLength) {
+                            *ReturnLength -= (ULONG)((BYTE*)spi - (BYTE*)prevSpi);
+                        }
+                        break;
+                    }
+                    else {
+                        PSYSTEM_PROCESS_INFORMATION nextSpi = (PSYSTEM_PROCESS_INFORMATION)((BYTE*)spi + spi->NextEntryOffset);
+                        ULONG skipSize = spi->NextEntryOffset;
+                        prevSpi->NextEntryOffset += skipSize;
+                        if (ReturnLength) {
+                            *ReturnLength -= skipSize;
+                        }
+                        spi = nextSpi;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        prevSpi = spi;
+
+        if (spi->NextEntryOffset == 0) {
+            break;
+        }
+
+        spi = (PSYSTEM_PROCESS_INFORMATION)((BYTE*)spi + spi->NextEntryOffset);
+    }
+
+    return status;
+}
+
+
+
+void patchProcessNameChecks() {
+    //NtQuerySystemInformation 
+
+    fpRtlEqualUnicodeString = (RtlEqualUnicodeString_t)GetProcAddress(GetModuleHandleA("ntdll.dll"), "RtlEqualUnicodeString");
+    HMODULE dll = GetModuleHandleA("ntdll.dll");
+    if (!dll) {
+        return;
+    }
+    FARPROC pFunc = GetProcAddress(dll, "NtQuerySystemInformation");
+    if (!pFunc) {
+        Console::print("Failed to get address of NtQuerySystemInformation");
+        return;
+    }
+
+    if (MH_CreateHook(pFunc, &NtQuerySystemInformation_hookfunc, reinterpret_cast<LPVOID*>(&fpNtQuerySystemInformation)) != MH_OK) {
+        Console::print("Failed to create hook for NtQuerySystemInformation");
+        return;
+    }
+
+    if (MH_EnableHook(pFunc) != MH_OK) {
+        Console::print("Failed to enable hook for NtQuerySystemInformation");
+        return;
+    }
+}
+
+//run from dll main to get pre unpacking hooks set
+void DebugPatches::earlyInit() {
+    MH_Initialize();
+    patchProcessNameChecks();// run this first cuz of shared fpNtQuerySystemInformation usage
+    freeIdaMutants(); //works, but how can we prevent it from ever happening
+    disableProgramScans();
     bypassHwndChecks();
-   // antiDebuggerSyscalls();
+    hookNtQueryInformationProcess();
     bypassHiddenThreadCreation();
     bypassThreadHideFromDebugger();
     bypassThreadQueryHideFromDebugger();
-#ifdef ARXAN_LOG_VEH
-    hookAddVEH();
-    DumpKnownAPIs();
-#endif
-    //restoreAllPatchedFunctions();
-    //startHideDebugLoop();
-    hookNtQueryInformationProcess();
+}
+
+void DebugPatches::init() {
+    DEV_INIT_PRINT();
+    freeIdaMutants(); //works, but how can we prevent it from ever happening
     hookNtClose();
     clearHWBP();
-//
-//#ifdef ARXAN_DEBUG_INFO
-//    Console::labelPrint(DebugPatches::conLabel, "Adding VEH");
-//#endif // ARXAN_DEBUG_INFO
-    //AddVectoredExceptionHandler(1, interrupt2dFilter); //https://unprotect.it/technique/int-0x2d/
 }

@@ -6,6 +6,7 @@
 #include "Arxan.hpp"
 #include <sstream>
 #include <iomanip> 
+#include <Hook.hpp>
 
 std::string ArxanPatches::conLabel = "ARX";
 
@@ -85,6 +86,15 @@ std::vector<uint64_t> integrityIntact =
     0x12010A98,
 };
 
+std::vector<uint64_t> integritySplitBasic =
+{
+    0x113EF885,
+    0x11500B5B,
+    0x11937FC0,
+    0x11BF4B2E,
+    0x11F3994B,
+    0x12018C51,
+};
 
 //hardcoding to save patching time
 std::vector<uint64_t> integrityIntactBig =
@@ -163,6 +173,173 @@ std::vector<uint64_t> integritySplit =
 
 inlineAsmStub* inlineStubs = nullptr;
 size_t stubCounter = 0;
+
+// --- Split basic block integrity (from BOIII, self-contained) ---
+struct integrity_handler_context {
+	uint32_t* computed_checksum;
+	uint32_t* original_checksum;
+};
+
+static const std::vector<std::pair<uint8_t*, size_t>>& get_text_sections()
+{
+	static const std::vector<std::pair<uint8_t*, size_t>> text = []
+	{
+		std::vector<std::pair<uint8_t*, size_t>> texts;
+		void* const moduleBase = GetModuleHandle(nullptr);
+		IMAGE_DOS_HEADER* pDOS = static_cast<IMAGE_DOS_HEADER*>(moduleBase);
+		IMAGE_NT_HEADERS* pNT = reinterpret_cast<IMAGE_NT_HEADERS*>(reinterpret_cast<uint8_t*>(moduleBase) + pDOS->e_lfanew);
+		IMAGE_SECTION_HEADER* pSection = IMAGE_FIRST_SECTION(pNT);
+		for (WORD i = 0; i < pNT->FileHeader.NumberOfSections; ++i, ++pSection)
+		{
+			if (pSection->Characteristics & IMAGE_SCN_MEM_EXECUTE)
+			{
+				texts.emplace_back(
+					reinterpret_cast<uint8_t*>(moduleBase) + pSection->VirtualAddress,
+					pSection->Misc.VirtualSize);
+			}
+		}
+		return texts;
+	}();
+	return text;
+}
+
+static bool is_in_texts(uint64_t addr)
+{
+	const auto& texts = get_text_sections();
+	for (const auto& text : texts)
+	{
+		const auto start = reinterpret_cast<uintptr_t>(text.first);
+		if (addr >= start && addr <= (start + text.second))
+			return true;
+	}
+	return false;
+}
+
+static bool is_on_stack(uint8_t* stack_frame, const void* pointer)
+{
+	const auto stack_value = reinterpret_cast<uint64_t>(stack_frame);
+	const auto pointer_value = reinterpret_cast<uint64_t>(pointer);
+	const auto diff = static_cast<int64_t>(stack_value - pointer_value);
+	return std::abs(diff) < 0x1000;
+}
+
+static bool is_handler_context(uint8_t* stack_frame, uint32_t computed_checksum, uint32_t frame_offset)
+{
+	const auto* potential_context = reinterpret_cast<integrity_handler_context*>(stack_frame + frame_offset);
+	return is_on_stack(stack_frame, potential_context->computed_checksum)
+		&& *potential_context->computed_checksum == computed_checksum
+		&& is_in_texts(reinterpret_cast<uint64_t>(potential_context->original_checksum));
+}
+
+static integrity_handler_context* search_handler_context(uint8_t* stack_frame, uint32_t computed_checksum)
+{
+	for (uint32_t frame_offset = 0; frame_offset < 0x90; frame_offset += 8)
+	{
+		if (is_handler_context(stack_frame, computed_checksum, frame_offset))
+			return reinterpret_cast<integrity_handler_context*>(stack_frame + frame_offset);
+	}
+	return nullptr;
+}
+
+static uint32_t adjust_integrity_checksum(uint64_t return_address, uint8_t* stack_frame, uint32_t current_checksum)
+{
+	integrity_handler_context* context = search_handler_context(stack_frame, current_checksum);
+	if (!context)
+	{
+		DEV_PRINTF("No frame offset for handler: %llX", static_cast<unsigned long long>(return_address));
+		return current_checksum;
+	}
+	const uint32_t correct_checksum = *context->original_checksum;
+	*context->computed_checksum = correct_checksum;
+	return correct_checksum;
+}
+
+template <typename T>
+static T extract_rip(void* address)
+{
+	auto* const data = static_cast<uint8_t*>(address);
+	const auto offset = *reinterpret_cast<int32_t*>(data);
+	return reinterpret_cast<T>(data + offset + 4);
+}
+
+static void* find_lea_target(void* start)
+{
+	uint8_t* p = static_cast<uint8_t*>(start);
+	for (int i = 0; i < 64; ++i)
+	{
+		uint8_t b = p[i];
+		if ((b & 0xF0) == 0x40)
+		{
+			if (p[i + 1] == 0x8D)
+			{
+				uint8_t modrm = p[i + 2];
+				if ((modrm & 0xC7) == 0x05)
+					return extract_rip<void*>(p + i + 3);
+			}
+		}
+	}
+	return nullptr;
+}
+
+static void patch_split_basic_block_integrity_check(void* address)
+{
+	const uint64_t game_address = reinterpret_cast<uint64_t>(address);
+	constexpr size_t inst_len = 3;
+	const uint64_t next_inst_addr = game_address + inst_len;
+	void* jump_target = nullptr;
+
+	if (*reinterpret_cast<uint8_t*>(next_inst_addr) == 0xE9)
+		jump_target = extract_rip<void*>(reinterpret_cast<void*>(next_inst_addr + 1));
+	if (!jump_target)
+		jump_target = find_lea_target(reinterpret_cast<void*>(next_inst_addr));
+	if (!jump_target)
+		return;
+
+	using namespace asmjit::x86;
+	static asmjit::JitRuntime runtime;
+	asmjit::CodeHolder code;
+	code.init(runtime.environment());
+	Assembler a(&code);
+
+	const uint64_t jump_target_addr = reinterpret_cast<uint64_t>(jump_target);
+
+	a.push(rax);
+	a.mov(rax, qword_ptr(rsp, 8));
+	a.push(rax);
+	pushad64();
+
+	a.mov(r8, qword_ptr(rsp, 0x88));
+	a.mov(rcx, rax);
+	a.mov(rdx, rbp);
+	a.mov(rax, reinterpret_cast<uint64_t>(&adjust_integrity_checksum));
+	a.call(rax);
+
+	a.mov(qword_ptr(rsp, 0x80), rax);
+	popad64();
+	a.pop(rax);
+	a.add(rsp, 8);
+	a.mov(ptr(rdx, rcx, 2), eax);
+	a.add(rsp, 8);
+	a.mov(r11, jump_target_addr);
+	a.push(r11);
+	a.ret();
+
+	void* stub = nullptr;
+	runtime.add(&stub, &code);
+	utils::hook::call(address, stub);
+}
+
+static void apply_integrity_split_basic_patches()
+{
+	for (size_t i = 0; i < integritySplitBasic.size(); i++)
+	{
+		void* resolved_address = reinterpret_cast<void*>(integritySplitBasic[i] + base);
+		patch_split_basic_block_integrity_check(resolved_address);
+	}
+#ifdef ARXAN_DEBUG_INFO
+	Console::labelPrint(ArxanPatches::conLabel, "Finished integritySplitBasic patches");
+#endif
+}
 
 uint32_t reverse_bytes(uint32_t bytes)
 {
@@ -948,6 +1125,7 @@ bool o = false;
 void ArxanPatches::init() {
     DEV_INIT_PRINT();
     createInlineAsmStub();
+    apply_integrity_split_basic_patches();
     //CreateChecksumHealingStub();
     //suspendAllOtherThreads();
 }

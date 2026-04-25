@@ -4,6 +4,7 @@
 #include <Hook.hpp>
 #include "LogFile.hpp"
 #include "DevDef.h"
+#include "Arxan.hpp"
 
 HMODULE hm;
 //0 - CLI, 1 - GUI, 2 - BOTH
@@ -29,7 +30,7 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpvReserved) {
 #endif
 
 		utils::hook::detour::detour(); // initialize minhook
-
+		DebugPatches::earlyInit();
 		if (EXTERNAL_CONSOLE_MODE == 0 || EXTERNAL_CONSOLE_MODE == 2) {
 			AllocConsole();
 			FILE* pFile = nullptr;

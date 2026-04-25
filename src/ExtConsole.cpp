@@ -98,6 +98,7 @@ void ExtConsole::extConInit(int extConsoleMode) {
 		std::cout << "extConsoleMode:" << extConsoleMode << "; CLI will be used" << std::endl;
 	}
 
+
 	infoPrintOffsets();
 	Functions::init();
 	Console::print("Sys_Cwd(): " + std::string(Functions::_Sys_Cwd()));

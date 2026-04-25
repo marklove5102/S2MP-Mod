@@ -715,3 +715,9 @@ union XAssetHeader {
     LuaFile* luafile;
     void* data;
 };
+
+struct XAsset
+{
+    XAssetType type;
+    XAssetHeader header;
+};

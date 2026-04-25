@@ -170,6 +170,16 @@ void setenginemode() {
 }
 #endif
 
+void getntflags() {
+	PPEB pPeb = (PPEB)__readgsqword(0x60);
+	DWORD dwNtGlobalFlag = *(PDWORD)((PBYTE)pPeb + 0xBC);
+	DEV_PRINTF("NtGlobalFlag: %d", dwNtGlobalFlag);
+}
+void setntflags() {
+	PPEB pPeb = (PPEB)__readgsqword(0x60);
+	*reinterpret_cast<PDWORD>(LPSTR(pPeb) + 0xBC) = 112;
+}
+
 void Console::registerCustomCommands() {
 	GameUtil::addCommand("noclip", &Noclip::toggle);
 	GameUtil::addCommand("map_restart", &CustomCommands::mapRestart);
@@ -190,6 +200,8 @@ void Console::registerCustomCommands() {
 	GameUtil::addCommand("unlockall", &CustomCommands::unlockAll);
 #ifdef DEVELOPMENT_BUILD
 	GameUtil::addCommand("printfNullptr", &printfCrashTest);
+	GameUtil::addCommand("getntflags", &getntflags);
+	GameUtil::addCommand("setntflags", &setntflags);
 	GameUtil::addCommand("enginemode", &setenginemode);
 	//GameUtil::addCommand("imagetest", &DevPatches::imageTestPt2);
 #endif // DEVELOPMENT_BUILD
